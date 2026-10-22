@@ -35,20 +35,26 @@ export function selectAndLoadDrive(confirmedLoadCard=false) {
         }
 
         storeLastLoadedDirectory(result.filePaths[0]);
-        dispatch(loadDrive(result.filePaths[0]));
+        let sampleReport = dispatch(loadDrive(result.filePaths[0]));
         dispatch(
           showNotice("is-success", "SD card and any existing samples and kits have been successfully loaded.")
         );
+
+        let changes = describeSampleChanges(sampleReport);
+        if (changes) {
+          dispatch(showNotice("is-warning", changes));
+        }
       })
   }
 }
 /**
  * Parse kits, samples, and drive details from the given directory
  * @param {String} drivePath - root path of the SamplePad drive
+ * @return {{added: String[], removed: String[]}} samples that changed on the card since it was last loaded
  */
 export function loadDrive(drivePath) {
   return (dispatch) => {
-      let {drive, kits} = getGlobalStateFromDirectory(drivePath);
+      let {drive, kits, sampleReport} = getGlobalStateFromDirectory(drivePath);
 
       // resetting to beginning state
       dispatch({ type: Actions.SET_SELECTED_KIT_ID, kitId: null });
@@ -58,5 +64,19 @@ export function loadDrive(drivePath) {
       dispatch({ type: Actions.LOAD_DRIVE, drive: drive });
       dispatch({ type: Actions.RESET_KITS, kits: kits });
       dispatch({ type: Actions.SORT_KITS });
+
+      return sampleReport;
   }
+}
+
+/**
+ * @param {{added: String[], removed: String[]}} report
+ * @return {String|null} a message if the samples on the card are different to the last time it was loaded
+ */
+const describeSampleChanges = (report) => {
+  if (!report || !report.removed.length) {
+    return null;
+  }
+
+  return report.removed.length + " sample(s) are no longer on the card and were removed from the list: " + report.removed.slice(0, 3).join(", ") + (report.removed.length > 3 ? ", ..." : "");
 }

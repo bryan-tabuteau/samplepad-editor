@@ -12,7 +12,8 @@
     "pack": "vite build && electron-builder build --mac",
     "pack:win": "vite build && electron-builder build --win --x64",
     "pack:linux": "vite build && electron-builder build --linux --x64",
-    "pack:all": "vite build && electron-builder build --mac --win --linux --x64"
+    "pack:all": "vite build && electron-builder build --mac --win --linux --x64",
+    "test": "vitest run"
   },
   "build": {
     "appId": "com.electron.samplepadeditor",
@@ -80,6 +81,7 @@
     "electron-builder": "^26.15.2",
     "sass": "^1.86.0",
     "vite": "^7.3.1",
+    "vitest": "^3.2.7",
     "wait-on": "^9.0.4"
   },
   "overrides": {

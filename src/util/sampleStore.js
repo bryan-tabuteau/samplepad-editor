@@ -17,6 +17,8 @@ const { store, fs, path } = window.api
  *  but dont overwrite files that have been truncated
  *    : TR-909-KICK.wav (stored as TR-909-1.wav), when uploading a file called TR-909-1.wav
  *      it'd have to get renamed to not overwrite on disk
+ *
+ *  display names always include the extension, and are matched case insensitively
  */
 class SampleStore {
 
@@ -29,18 +31,33 @@ class SampleStore {
 
     /** @var all the samples on the current device {fileName => fileNameOnDisk} */
     this.deviceSamples = {}
+
+    this._loadFilenames()
   }
 
   getSamples() {
     return this.deviceSamples
   }
 
+  /**
+   * @return {String[]} the display names of all samples on the current device, sorted
+   */
+  getSampleNames() {
+    return Object.keys(this.deviceSamples)
+      .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
+  }
+
+  hasSample(fileName) {
+    return !!this._findKey(fileName)
+  }
+
   getFileNameOnDisk(fileName) {
-    return this.devicePath + "/" + this.deviceSamples[fileName]
+    return this.devicePath + "/" + this.deviceSamples[this._findKey(fileName)]
   }
 
   /**
    * Get the string to write to a kit file for the given file
+   * A sample that isn't on the card is written as-is, so a kit never loses its reference to it
    * @param {String} fileName
    * @return {String}
    */
@@ -49,7 +66,10 @@ class SampleStore {
       return ""
     }
 
-    return this.deviceSamples[fileName].replace(Drive.SAMPLE_EXTENSION, "")
+    let key = this._findKey(fileName)
+    let fileNameOnDisk = key ? this.deviceSamples[key] : fileName
+
+    return this._dropExtension(fileNameOnDisk).substr(0, Drive.MAX_FILENAME_LENGTH)
   }
 
   getFileNameFromKitFile(fileName) {
@@ -59,11 +79,7 @@ class SampleStore {
 
     let reverseList = this._getFlippedDeviceSamples()
 
-    if (reverseList[fileName]) {
-      return reverseList[fileName]
-    }
-
-    return fileName
+    return reverseList[fileName.toLowerCase()] || fileName
   }
 
   /**
@@ -84,107 +100,216 @@ class SampleStore {
 
           // run the import on a timeout to let the notice above show
           setTimeout(() => {
-            let hadCopyError = false
+            let importResult
 
-            let parseDirectory = (fileList) => {
-              fileList.forEach((file) => {
-                if (fileCount >= Drive.MAX_SAMPLES) {
-                  return
-                }
-
-                if (fs.isDirectory(file)) {
-                  // read directories recursively
-                  parseDirectory(fs.getFileListFromDirectory(file))
-                } else {
-                  let samplePath = path.parse(file)
-
-                  if (samplePath.ext === Drive.SAMPLE_EXTENSION) {
-                    let sample = this.addSample(samplePath.name, false)
-
-                    try {
-                      copySample(file, this.devicePath, sample.fileNameOnDisk)
-
-                      // add the sample to the filename lists, so any subsequent copies will know its there
-                      this._addFileReference(sample.fileName)
-                      fileCount++
-                    } catch (err) {
-                      hadCopyError = true
-                    }
-                  }
-                }
-              })
+            try {
+              importResult = this.importFiles(result.filePaths, fileCount)
+            } catch (err) {
+              console.error(err)
+              dispatch(showNotice("is-danger", "There was a problem importing samples."))
+              return
             }
 
-            parseDirectory(result.filePaths)
-            this._saveSamples()
+            dispatch({ type: Actions.RESET_SAMPLES, samples: this.getSampleNames() })
 
-            dispatch({ type: Actions.RESET_SAMPLES, samples: Object.keys(this.deviceSamples) })
-
-            if (hadCopyError) {
-              dispatch(
-                showNotice("is-warning", "There was a problem importing one or more samples.")
-              )
-            } else {
-              dispatch(
-                showNotice("is-success", "Samples successfully imported.")
-              )
-            }
-          },100)
+            let summary = this.getImportSummary(importResult)
+            dispatch(showNotice(summary.style, summary.text))
+          }, 100)
         })
     }
   }
 
   /**
-   * Given a directory, load the sample list from disk if it already exists
-   * otherwise read all the samples and store it to disk
-   * @param {String} devicePath
+   * Copy the given files (and the contents of any directories, recursively) into the drive
+   * @param {String[]} filePaths
+   * @param {Number} currentCount - the number of samples already on the drive
+   * @return {{imported: Number, failed: String[], ignored: String[], limited: String[]}}
+   *   failed:  samples that could not be read or written
+   *   ignored: files that are not wav files
+   *   limited: samples skipped because the drive is full
    */
-  loadSamplesFromDirectory(deviceId, devicePath) {
-    if (this.samples[deviceId]) {
-      // if we already have reference to this device, use the stored state
-      this._loadDevice(deviceId)
+  importFiles(filePaths, currentCount) {
+    let result = { imported: 0, failed: [], ignored: [], limited: [] }
+    let fileCount = currentCount
+
+    let parseDirectory = (fileList) => {
+      fileList.forEach((file) => {
+        if (fs.isDirectory(file)) {
+          // read directories recursively
+          parseDirectory(fs.getFileListFromDirectory(file))
+          return
+        }
+
+        let samplePath = path.parse(file)
+
+        if (samplePath.ext.toLowerCase() !== Drive.SAMPLE_EXTENSION) {
+          result.ignored.push(samplePath.base)
+          return
+        }
+
+        // overwriting a sample with the same display name doesn't use up another slot
+        let previousKey = this._findKey(samplePath.base)
+        let previous = previousKey ? { key: previousKey, fileNameOnDisk: this.deviceSamples[previousKey] } : null
+
+        if (!previous && fileCount >= Drive.MAX_SAMPLES) {
+          result.limited.push(samplePath.base)
+          return
+        }
+
+        try {
+          let sample = this.addSample(samplePath.base, false)
+
+          try {
+            copySample(file, this.devicePath, sample.fileNameOnDisk)
+          } catch (err) {
+            this._undoAddSample(sample.fileName, previous)
+            throw err
+          }
+
+          result.imported++
+          if (!previous) {
+            fileCount++
+          }
+        } catch (err) {
+          result.failed.push(samplePath.base)
+        }
+      })
+    }
+
+    try {
+      parseDirectory(filePaths)
+    } finally {
+      this._saveSamples()
+    }
+
+    return result
+  }
+
+  /**
+   * Describe the outcome of an import to the user
+   * @param {Object} result - from importFiles
+   * @return {{style: String, text: String}}
+   */
+  getImportSummary(result) {
+    let parts = []
+
+    if (result.imported) {
+      parts.push(result.imported + (result.imported === 1 ? " sample" : " samples") + " imported.")
     } else {
-      // otherwise load state from disk
-      this.deviceId = deviceId
-      this.devicePath = devicePath
+      parts.push("No samples were imported.")
+    }
+    if (result.failed.length) {
+      parts.push(result.failed.length + " could not be imported (" + this._listNames(result.failed) + ").")
+    }
+    if (result.limited.length) {
+      parts.push(result.limited.length + " skipped, the card is limited to " + Drive.MAX_SAMPLES + " samples.")
+    }
+    if (result.ignored.length) {
+      parts.push(result.ignored.length + " non-wav " + (result.ignored.length === 1 ? "file" : "files") + " ignored.")
+    }
 
-      this.deviceSamples = Object.fromEntries(
-        fs.getSampleFiles(devicePath)
-          .map((dirent) => {
-            return [dirent.name, dirent.name]
-          })
-        )
+    let hasProblem = result.failed.length || result.limited.length || !result.imported
 
-      this
-        ._saveSamples()
-        ._saveDevicePath(devicePath)
+    return {
+      style: hasProblem ? "is-warning" : "is-success",
+      text: parts.join(" ")
     }
   }
 
   /**
+   * Load the sample list for a card. The list of samples is always checked against what
+   * is actually on the card, since files can be added or removed outside of this app
+   * @param {String} deviceId
+   * @param {String} devicePath - where the card is mounted right now
+   * @return {{added: String[], removed: String[]}} what changed since the card was last seen
+   */
+  loadSamplesFromDirectory(deviceId, devicePath) {
+    this.deviceId = deviceId
+    this.devicePath = devicePath
+
+    let filesOnDisk = fs.getSampleFiles(devicePath).map((dirent) => dirent.name)
+    let filesOnDiskByLowerCase = Object.fromEntries(filesOnDisk.map((name) => [name.toLowerCase(), name]))
+
+    let samples = {}
+    let claimed = {}
+    let added = []
+    let removed = []
+
+    Object.entries(this.samples[deviceId] || {}).forEach(([displayName, fileNameOnDisk]) => {
+      // older versions stored display names without an extension
+      let fileName = this._hasExtension(displayName) ? displayName : displayName + Drive.SAMPLE_EXTENSION
+      let actualFileName = filesOnDiskByLowerCase[fileNameOnDisk.toLowerCase()]
+
+      if (!actualFileName || claimed[actualFileName]) {
+        removed.push(displayName)
+        return
+      }
+
+      claimed[actualFileName] = true
+      samples[fileName] = actualFileName
+    })
+
+    filesOnDisk.forEach((fileName) => {
+      if (!claimed[fileName]) {
+        samples[fileName] = fileName
+        added.push(fileName)
+      }
+    })
+
+    this.deviceSamples = samples
+
+    this
+      ._saveSamples()
+      ._saveDevicePath(devicePath)
+
+    return { added, removed }
+  }
+
+  /**
    * Add a new file to the current device
-   * @param {String} fileName
+   * @param {String} fileName - the display name, including extension
    */
   addSample(fileName, save=true) {
-    // if the sample already exists, do we want to overwrite it?
-    if (this._fileExists(fileName)) {
-      // overwriting a sample - remove references to it so it can be overwritten
-      this._removeFileReference(fileName)
+    let fileNameOnDisk
+
+    let existingKey = this._findKey(fileName)
+    if (existingKey) {
+      // overwriting a sample - reuse its file on disk, so no orphaned copies are left behind
+      fileNameOnDisk = this.deviceSamples[existingKey]
+      delete this.deviceSamples[existingKey]
+    } else {
+      fileNameOnDisk = this._getFormattedFileName(fileName)
     }
 
-    this.deviceSamples[fileName] = this._getFormattedFileName(fileName)
+    this.deviceSamples[fileName] = fileNameOnDisk
+    this._loadFilenames()
 
     if (save) {
       this._saveSamples()
     }
 
-    return Sample(fileName, this.deviceSamples[fileName])
+    return Sample(fileName, fileNameOnDisk)
+  }
+
+  /**
+   * Revert addSample, e.g. because the file could not be written
+   * @param {String} fileName
+   * @param {?{key: String, fileNameOnDisk: String}} previous - what addSample replaced, if anything
+   */
+  _undoAddSample(fileName, previous) {
+    delete this.deviceSamples[fileName]
+
+    if (previous) {
+      this.deviceSamples[previous.key] = previous.fileNameOnDisk
+    }
+
+    this._loadFilenames()
   }
 
   _getFlippedDeviceSamples() {
     let ret = {}
     Object.keys(this.deviceSamples).forEach(key => {
-      ret[this.deviceSamples[key]] = key
+      ret[this.deviceSamples[key].toLowerCase()] = key
     })
     return ret
   }
@@ -209,51 +334,57 @@ class SampleStore {
     store.save('samples', {})
   }
 
-  _loadDevice(deviceId) {
-    this.deviceId = deviceId
-
-    // todo: sort the samples by display name here
-    this.devicePath = this.devicePaths[deviceId]
-    this.deviceSamples = this.samples[deviceId]
-    this._loadFilenames()
-  }
-
   _loadFilenames() {
     /** the file names as stored on disk - this is used for r/w only, not file uniqueness */
     this.fileNamesOnDisk = Object.fromEntries(
       Object.entries(this.deviceSamples).map(([fileName, fileNameOnDisk]) => [fileNameOnDisk.toLowerCase(), true])
     )
 
-    /** the file names displayed to the user - this is used for uniqueness */
+    /** lowercase file name => the file name displayed to the user - this is used for uniqueness and lookups */
     this.fileNames = Object.fromEntries(
-      Object.entries(this.deviceSamples).map(([fileName, fileNameOnDisk]) => [fileName.toLowerCase(), true])
+      Object.keys(this.deviceSamples).map((fileName) => [fileName.toLowerCase(), fileName])
     )
   }
 
-  _fileExists(fileName) {
-    return this.fileNames[(fileName).toLowerCase()] || false
+  /**
+   * @param {String} fileName
+   * @return {String|undefined} the display name the sample is stored under, matched case insensitively
+   */
+  _findKey(fileName) {
+    return fileName ? this.fileNames[fileName.toLowerCase()] : undefined
   }
 
   _fileExistsOnDisk(fileName) {
     return this.fileNamesOnDisk[(fileName).toLowerCase()] || false
   }
 
-  _removeFileReference(fileName) {
-    delete this.fileNamesOnDisk[this.deviceSamples[fileName].toLowerCase()]
-    delete this.fileNames[(fileName).toLowerCase()]
+  _hasExtension(fileName) {
+    return fileName.toLowerCase().endsWith(Drive.SAMPLE_EXTENSION)
   }
 
-  _addFileReference(fileName) {
-    this.fileNamesOnDisk[this.deviceSamples[fileName].toLowerCase()] = true
-    this.fileNames[(fileName).toLowerCase()] = true
+  _dropExtension(fileName) {
+    return this._hasExtension(fileName)
+      ? fileName.substr(0, fileName.length - Drive.SAMPLE_EXTENSION.length)
+      : fileName
+  }
+
+  _listNames(names) {
+    let shown = names.slice(0, 3).join(", ")
+
+    return names.length > 3 ? shown + ", ..." : shown
   }
 
   _getFormattedFileName(displayName) {
     // drop the extension
-    let fileName = displayName.substr(0, displayName.length - Drive.SAMPLE_EXTENSION.length)
+    let fileName = this._dropExtension(displayName)
 
     // remove any non-alphanumeric characters
     fileName = fileName.replace(/[^0-9a-z]/gi, '')
+
+    // a name made of nothing but symbols still needs something to go on
+    if (!fileName) {
+      fileName = "sample"
+    }
 
     // ideally, use the actual name or some portion of it, truncate it to a max length
     fileName = fileName.substr(0, Drive.MAX_FILENAME_LENGTH)

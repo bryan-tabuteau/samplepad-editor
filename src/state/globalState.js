@@ -12,7 +12,7 @@ const { fs } = window.api;
 
 /**
  * @param {String} rootPath
- * @return {RootModel, KitModel[]}
+ * @return {RootModel, KitModel[], {added: String[], removed: String[]}} drive, kits, and the samples that changed since the card was last loaded
  */
 export const getGlobalStateFromDirectory = (rootPath) => {
   if(!fs.exists(rootPath)) {
@@ -23,7 +23,7 @@ export const getGlobalStateFromDirectory = (rootPath) => {
   let kits = {};
   let kitPath = rootPath + "/" + Drive.KIT_DIRECTORY;
 
-  SampleStore.loadSamplesFromDirectory(deviceId, rootPath)
+  let sampleReport = SampleStore.loadSamplesFromDirectory(deviceId, rootPath)
 
   if(fs.exists(kitPath)) {
     let kitFiles = fs.getKitFiles(kitPath)
@@ -34,12 +34,12 @@ export const getGlobalStateFromDirectory = (rootPath) => {
     });
   }
 
-  let drive = RootModel(deviceId, deviceType, rootPath, kitPath, Object.keys(SampleStore.getSamples()));
+  let drive = RootModel(deviceId, deviceType, rootPath, kitPath, SampleStore.getSampleNames());
 
   // set the menu to this drive's device type
   resetDeviceType(deviceType);
 
-  return {drive, kits};
+  return {drive, kits, sampleReport};
 }
 
 const getDeviceDetailsFromDirectory = (devicePath) => {
