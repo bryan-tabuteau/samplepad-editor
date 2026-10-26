@@ -6,6 +6,7 @@ import { KitModel, PadModel } from 'state/models';
 import { openKitFileDialog } from 'util/fileDialog';
 import { getKitAndPadsFromFile } from 'util/kitFile';
 import { saveKitToFile, kitWillOverwriteExisting } from 'util/storage';
+import SampleStore from 'util/sampleStore';
 
 /** KIT ACTION CREATORS */
 /**
@@ -66,6 +67,13 @@ export function loadKitDetails(kitId) {
           "pads": result.kit.pads
         }));
         dispatch({ type: Actions.SORT_KITS });
+
+        let missing = getMissingSamples(result.pads);
+        if (missing.length) {
+          dispatch(
+            showNotice("is-warning", "Kit " + result.kit.kitName + " uses samples that are not on the SD card: " + missing.slice(0, 3).join(", ") + (missing.length > 3 ? ", ..." : ""))
+          );
+        }
       } catch (err) {
         // failed kit load - load a default empty kit
         dispatch(loadNewKit({
@@ -81,6 +89,23 @@ export function loadKitDetails(kitId) {
       }
     }
   }
+}
+/**
+ * @param {Map} pads - padId => PadModel
+ * @return {String[]} the unique names of samples used by the pads that are not on the SD card
+ */
+const getMissingSamples = (pads) => {
+  let missing = {};
+
+  Object.values(pads).forEach((pad) => {
+    [pad.fileName, pad.fileNameB].forEach((fileName) => {
+      if (fileName && !SampleStore.hasSample(fileName)) {
+        missing[fileName] = true;
+      }
+    });
+  });
+
+  return Object.keys(missing);
 }
 /**
  * create an empty kit and add it to the kit list
